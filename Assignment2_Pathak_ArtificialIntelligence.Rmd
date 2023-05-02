@@ -1,0 +1,262 @@
+---
+title: "Assignment2_Pathak_ArtificialIntelligence"
+author: "Rohan Pathak"
+date: "`r Sys.Date()`"
+output: html_document
+---
+## **Objective**
+The objective is to analyze a GitHub topic, parsing data related to the Repos, Owner and Closed Issues through open GitHub API "gh". 
+
+## **Repository**
+<https://github.com/topics/artificial-intelligence>
+Topic: Artificial Intelligence
+Total Public Repositories: 16,484
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+## Importing required libraries and setting github token
+```{r, message=FALSE, warning=FALSE}
+library(gh)
+library(dplyr)
+library(tidyr)
+library(httr)
+library(purrr)
+library(tidyverse)
+library(kableExtra)
+library(ggplot2)
+library(ggthemes)
+library(repurrrsive)  
+library(tools) 
+my_token = "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"
+Sys.setenv(GITHUB_TOKEN = my_token)
+
+```
+
+
+## Creating the first table-
+
+A table summarizing the repositories with the following columns: repo_name ,
+created_year (from created_at), size, language, topics.
+```{r, message=FALSE, warning=FALSE}
+
+repository <- gh("/search/repositories", q = "topic:artificial-intelligence",
+                 .limit=600, token = my_token)$items
+
+df1 = map_df(
+  repository, magrittr::extract,
+  c("name", "created_at", "size","language","topics") 
+)
+
+kbl(df1[1:10,]) %>%
+  kable_paper(bootstrap_options = "striped", full_width = T)
+
+
+```
+Here the repositories under topic "artificial-intelligence" are scraped using the github API called gh. It is scraped as list into the variable "repository". It's then converted into a dataframe using purrr map_df. We chose 600 as each topics field is treated as a distinct entry and thus the actual number of unique rows would be less than 500.
+
+```{r, message=FALSE, warning=FALSE}
+grouped_df <- df1 %>% group_by(name, created_at, size, language) %>% 
+  summarize(topics = paste(topics, collapse = ", "))
+
+out_df1 <- head(grouped_df, 500)
+out_df1[is.na(out_df1)] <- NA
+
+kbl(grouped_df[1:10,]) %>%
+  kable_paper(bootstrap_options = "striped", full_width = F)
+```
+The dataframe is created with duplicate rows for repositories with multiple topics. Thus, we group the rows.
+
+```{r, message=FALSE, warning=FALSE}
+out_df1 <- out_df1 %>% 
+  mutate(created_year = format(as.POSIXct(created_at), "%Y")) %>% 
+  select(-created_at) 
+out_df1 <- subset(out_df1, select = -c(created_at))
+out_df1 <- out_df1 %>% 
+  rename(repo_name = name)
+out_df1 <- out_df1 %>% 
+  select(repo_name, created_year, everything())
+
+kbl(out_df1[1:10,]) %>%
+  kable_paper(bootstrap_options = "striped", full_width = F)
+
+```
+Finally we extract year from the created_at field and rearrange and rename the columns.
+
+## Creating the second table- 
+
+A table summarizing the owners of these repositories with the following columns:
+login , public_repos (count), created_year (from created_at), followers (count)
+```{r, message=FALSE, warning=FALSE}
+Users_Data <- data.frame(login = character(), public_repos = integer(),
+                            followers = integer(), created_at = character())
+
+```
+Here we first create an empty dataframe. We will be trying a different method compared to map_df for the remaining tables.
+
+```{r, message=FALSE, warning=FALSE}
+null_check <- function(x) {is.null(x)}
+fill_values <- function(x){ifelse(is.null(x), 0, x)}
+len <- length(repository)
+```
+We define functionss to check if a numeric value is null and to fill it with 0. We get the length of the repository to be used as an upper limit.
+
+```{r, message=FALSE, warning=FALSE}
+
+for (n in 1:len) { 
+  owner <- repository[[n]]$owner$login
+  user_profile <- gh("/users/:owner", owner = owner, .limit=Inf)
+ 
+  login <- user_profile$login
+  public_repos <- user_profile$public_repos
+  followers <- user_profile$followers
+  created_at <- user_profile$created_at
+  
+  if (null_check(public_repos) | null_check(followers) | null_check(created_at))
+  {
+    fill_values(public_repos)
+    fill_values(followers)
+    fill_values(created_at)
+  }
+  
+  Users_Data <- rbind(Users_Data, data.frame(login = login, 
+                                                     public_repos = public_repos,
+                                                     followers = followers,
+                                                     created_at = created_at))
+  
+}
+
+
+```
+We loop through the 'items' in repository list, extracting the login of the owner. We use this extracted value to then scrape the user's repo url as the counts of public_repos, followers, and created_at are available there. We then add the values to the empty dataframe earlier created using rbind.
+
+```{r, message=FALSE, warning=FALSE}
+Users_Data <- Users_Data %>% arrange(desc(public_repos))
+out_df2<- distinct(Users_Data)
+
+out_df2 <- out_df2 %>% 
+  mutate(created_year = format(as.POSIXct(created_at), "%Y")) %>% 
+  select(-created_at) 
+
+out_df2 <- out_df2 %>% 
+  select(login, created_year, everything())
+
+kbl(out_df2[1:10,]) %>%
+  kable_paper(bootstrap_options = "striped", full_width = T)
+```
+We arrange the dataframe according to the public_repos count. We then remove duplicate entries as a user could have created multiple repositories and thus could be added to the dataframe multiple times. We again extract the created year, rename and rearrange the columns.
+
+
+## Creating the third table-
+A table showing the most recently closed issue in each repository with the following columns: repo_name, issue_title, created_at, closed_at.
+```{r, message=FALSE, warning=FALSE}
+repos_info <- data.frame(name=character(),
+                         issue_title=character(),
+                         created_at=character(), 
+                         closed_at=character()) 
+
+```
+We again create an empty table.
+
+```{r, message=FALSE, warning=FALSE}
+for (n in 1:500) { 
+  tryCatch({
+    name = repository[[n]]$name
+    closed_issues_url <- paste0(repository[[n]]$url,"/issues?state=closed")
+    issuetest <- try(gh(closed_issues_url, .limit=1), silent = TRUE)
+    if(inherits(issuetest, "try-error")){
+      warning(paste("Error in retrieving data for repository ", name, "."))
+    } else if(length(issuetest) > 0) {
+      issue_title = issuetest[[1]]$title
+      created_at = issuetest[[1]]$created_at
+      closed_at = issuetest[[1]]$closed_at
+      
+      if (!(null_check(name) & null_check(issue_title) & null_check(created_at)
+            & null_check(closed_at)))
+      {
+        repos_info<-rbind(repos_info, data.frame(name = name,
+                                                 issue_title = issue_title,
+                                                 created_at = created_at,
+                                                 closed_at=closed_at
+        ))
+      }
+    }
+  })
+}
+```
+Similar to the second table, we decided to loop through the repository list. However the required data is found in another url. We create this using paste0 on the "url" item to create a url for the closed issues. We then capture only the first entries for issue_title, created_at, and closed_at, since we only need the most recently closed issues. 
+We added a trycatch block as it was found that the 47th user had no closed issues, thus the url was invalid which was causing the gh code to return an error. 
+
+```{r, message=FALSE, warning=FALSE}
+out_df3<- distinct(repos_info)
+out_df3<- head(out_df3,500)
+out_df3 <- out_df3 %>% 
+  rename(repo_name = name)
+kbl(out_df3[1:10,]) %>%
+  kable_paper(bootstrap_options = "striped", full_width = T)
+```
+We again drop duplicates like the second table, make sure that only 500 records are captured, and rename the column name.
+
+## Data Visualization
+
+## Plot 1 - Bar Plot of Top 5 Co-Occuring Topics
+
+```{r, message=FALSE, warning=FALSE}
+ai_df<-out_df1
+ai_df <- ai_df %>% separate_rows(topics, sep = ", ")
+
+other_topics <- ai_df %>% 
+  filter(topics != "artificial-intelligence") %>% 
+  group_by(topics) %>% 
+  summarize(count = n()) %>% 
+  arrange(desc(count))
+
+
+ggplot(head(other_topics, 5), aes(x = reorder(topics, count), y = count)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Other Topics That Co-Occur with Artificial Intelligence",
+       x = "Topic",
+       y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+
+It is evident from the plot that the by far the two topics which are tagged together with artificial intelligence are machine learning (~300) and deep learning (~260). This is a good sign of the topics which are more popular in the coding community, compared to computer vision which lags being with about 75 entries.
+The presence of the python tag shows that it's currently the language of choice when working on this topic.
+
+## Plot 2- Line Graph of Number of Repositories Created Each Year
+```{r, message=FALSE, warning=FALSE}
+out_df1$year <- as.numeric(format(as.Date(paste0(out_df1$created_year, "-01-01")), "%Y"))
+
+year_count <- aggregate(repo_name ~ year, data = out_df1, FUN = length)
+
+ggplot(data = year_count, aes(x = year, y = repo_name)) + 
+  geom_line() +
+  xlab("Year") +
+  ylab("Number of Repositories") +
+  ggtitle("Number of Repositories Created Each Year") +
+  theme_bw()
+```
+
+
+We can infer that the number of repositories created exponentially increased from 2015 to a peak at 2019, after which there is a sharp, stepped fall post 2020. However, the number of repositories created did not reach the low numbers of pre 2015, instead they seem to have stabilized as can be seen fir 2021 and 2022. 
+For year 2023, we can see the number of created repositories are already equal to the total created in the whole year of 2014. This is usually a sign of maturing of the topic.
+```{r, message=FALSE, warning=FALSE}
+repos_by_year <- out_df1 %>%
+  group_by(created_year) %>%
+  summarize(count = n())
+
+ggplot(data = repos_by_year, aes(x = created_year, y = count)) +
+  geom_line() +
+  geom_point() +
+  xlab("Year") +
+  ylab("Number of Repositories Created") +
+  ggtitle("Number of Repositories Created Each Year") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+We can see a more granular picture with the point graph.
